@@ -1,6 +1,6 @@
 package edu.ucsal.fiadopay.controller;
 
-import edu.ucsal.fiadopay.service.PaymentService;
+import edu.ucsal.fiadopay.service.PaymentServiceFacade;
 import org.springframework.http.*;
 import org.springframework.web.bind.annotation.*;
 import lombok.RequiredArgsConstructor;
@@ -12,7 +12,7 @@ import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 @RequestMapping("/fiadopay/gateway")
 @RequiredArgsConstructor
 public class PaymentController {
-  private final PaymentService service;
+  private final PaymentServiceFacade service;
 
   @PostMapping("/payments")
   @SecurityRequirement(name = "bearerAuth")
