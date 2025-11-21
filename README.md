@@ -1,306 +1,299 @@
-FiadoPay — Backend Refatorado (Java 21 + Spring Boot)
-Este projeto é uma refatoração do FiadoPay, seguindo as exigências da disciplina para aplicar boas práticas de engenharia de software, anotações customizadas, reflexão, threads assíncronas e manutenção do contrato da API original.
-O objetivo principal foi tornar o sistema mais modular, extensível, seguro e organizado, mantendo todo o comportamento que o FiadoPay já tinha.
+# FiadoPay — Backend Refatorado (Java 21 + Spring Boot)
 
-Contexto
-O FiadoPay original apresentava um nível crítico de alto acoplamento e baixa coesão.
- Grande parte das regras essenciais estavam centralizadas dentro de um único serviço (PaymentService), que misturava responsabilidades diversas e independentes.
-Dentro dessa classe havia:
-Criação e autenticação de merchants
+Este projeto é uma refatoração completa do FiadoPay, seguindo a especificação da disciplina.  
+Foram aplicadas boas práticas modernas de engenharia de software, com foco em desacoplamento, modularidade, anotações customizadas, reflexão e processamento assíncrono — mantendo 100% do contrato original da API.
 
+---
 
-Criação, consulta e refund de pagamentos
+# 1. Contexto
 
+O sistema original possuía alto acoplamento e baixa coesão.  
+Grande parte das responsabilidades estava centralizada em `PaymentService`, que acumulava funções completamente distintas:
 
-Processamento síncrono dos pagamentos
+*   criação e autenticação de merchants  
+*   criação, consulta e refund de pagamentos  
+*   cálculo de juros e parcelamento  
+*   validações antifraude  
+*   simulação de gateway  
+*   envio de webhooks de forma **bloqueante**  
+*   acesso direto aos repositórios  
+*   nenhuma extensibilidade via plugins  
+*   fluxo 100% síncrono  
 
+Na prática, isso tornava o FiadoPay rígido, difícil de modificar e distante de um gateway real.
 
-Juros e regras de parcelamento coladas no código
+---
 
+# 2. Objetivo da Refatoração
 
-Validações antifraude embutidas diretamente na lógica
+A meta foi reorganizar totalmente o núcleo interno do FiadoPay sem alterar:
 
+*   rotas  
+*   formatos das requisições  
+*   regras de idempotência  
+*   retorno dos endpoints  
+*   comportamento dos webhooks  
+*   simulação de aprovação/declínio  
 
-Envio de webhooks de forma bloqueante
+Ou seja: **externamente nada muda**, mas internamente o sistema passa a ser modular, limpo e extensível.
 
+---
 
-Persistência realizada diretamente via repository
+# 3. Decisões de Arquitetura
 
+## 3.1. Fachada `PaymentServiceFacade`
 
-Ausência total de extensibilidade
+Antes: o controller chamava vários serviços.  
+Depois: um único ponto central coordena tudo.
 
+Benefícios:
+*   menor acoplamento  
+*   código mais legível  
+*   serviço pronto para expansão  
+*   teste isolado facilitado  
 
-Nenhum processamento assíncrono
+---
 
+## 3.2. Estratégias de Juros (`strategies/`)
 
-Em um sistema de pagamentos real, esse design seria inviável:
- alterar ou adicionar um método de pagamento, regra de antifraude ou webhook exigiria modificar o núcleo do sistema, quebrando modularidade e fragilizando toda a arquitetura.
+Criamos um pacote `strategies/` contendo:
 
+- `PixInterestStrategy`
+- `DebitInterestStrategy`
+- `BoletoInterestStrategy`
 
-Objetivo da Refatoração
-A meta foi refatorar completamente o núcleo interno do FiadoPay sem alterar nenhum comportamento exposto na API, preservando:
-Rota de autenticação fake
+Todas implementam:
 
-
-Idempotência com chave obrigatória
-
-
-Fluxo de criação de pagamento
-
-
-Webhooks
-
-
-Estrutura conceitual dos pagamentos
-
-
-Juros aplicados para pagamentos parcelados
-
-
-Ou seja:
-O cliente que consome o FiadoPay não deve perceber nenhuma alteração,
- mas internamente o sistema agora conta com um arcabouço robusto, extensível e orientado a componentes.
-
-Decisões de Design
-🔹 2.1. Introdução da fachada: PaymentServiceFacade
-Antes, o controller chamava múltiplos serviços diretamente.
-Agora, um único ponto orquestra tudo, reduz acoplamento.
-Isso melhora:
-testes,
-
-
-troca de implementação,
-
-
-leitura de código.
-
-
-Estratégias de juros por método de pagamento
-Criamos o pacote:
-strategies/
-
-Com implementações para cada método:
-PixInterestStrategy
-
-
-DebitInterestStrategy
-
-
-BoletoInterestStrategy
-
-
-E todas implementam:
-public interface PaymentInterestStrategy
-
-Cada estratégia foi anotada com:
+```
+public interface PaymentInterestStrategy {
+    InterestResult calculate(BigDecimal amount, Integer installments);
+}
+```
+Cada estratégia recebe a anotação:
+```
 @PaymentHandler("PIX")
-@PaymentHandler("DEBIT")
-@PaymentHandler("BOLETO")
+```
+Isso elimina IFs gigantes e habilita plugabilidade real.
 
-Assim, o FiadoPay passou a suportar juros/sem juros por estratégia, e fica fácil estender para Cartão (com juros reais).
-Uso de reflexão + anotações customizadas
-Criamos a anotação:
+## 3.3. Anotações Customizadas + Reflexão
+
+Criada a anotação:
+```
 @Target(ElementType.TYPE)
 @Retention(RetentionPolicy.RUNTIME)
 public @interface PaymentHandler {
     String value();
 }
+```
+A classe PaymentCreatorService faz descoberta automática de todas as estratégias anotadas.
 
-O PaymentCreatorService lê todas as estratégias automaticamente, assim:
-O código fica menos hardcoded
+Vantagens:
 
+*   adicionar um novo método de pagamento = criar 1 classe → o sistema detecta sozinho
+*   zero alteração no núcleo
+*   comportamento dinâmico e extensível
 
-Não existe mais if(method.equals("PIX")) ...
+## 3.4. Processamento Assíncrono com ExecutorService
 
+Para remover o comportamento bloqueante original, criamos:
 
-O sistema escala com 1 linha nova de código por estratégia
+config/ExecutorConfig.java:
+```
+@Bean
+public ExecutorService paymentExecutor() {
+    return Executors.newFixedThreadPool(10);
+}
+```
+Esse pool de threads processa:
 
+*   aprovação/declínio dos pagamentos
+*   simulação de antifraude
+*   delays de gateway
+*   envio de webhooks
 
-2.4. Processamento Assíncrono com ExecutorService
-Para remover o comportamento bloqueante do FiadoPay — onde a criação do pagamento esperava toda a cadeia de processamento (cálculo de juros, antifraude, simulação de gateway e disparo de webhook) — foi introduzido um mecanismo de execução paralela via ExecutorService.
-Criamos a classe:
-config/ExecutorConfig.java
+O fluxo se torna:
 
-Ela expõe um bean Spring responsável por gerenciar um pool fixo de threads:
-Executors.newFixedThreadPool(10);
+*   API recebe pagamento
+*   retorna imediatamente com PENDING
+*   thread separada processa
+*   webhook é disparado depois
 
-Esse pool é utilizado para:
-Processar pagamentos em background
- O usuário recebe imediatamente a resposta da API (status PENDING), enquanto o processamento real ocorre “por trás do sistema”, tal como gateways como Stripe, Pagar.me e Adyen.
+Isso simula gateways reais como Stripe, Adyen e Pagar.me.
 
+## 3.5. Webhook Automático
 
-Executar webhooks de forma assíncrona
- O envio do webhook agora ocorre em outra thread, com possíveis retries, evitando travar o fluxo principal de pagamento.
+WebhookProcessor executa em background:
 
+*   leitura do pagamento
+*   envio do callback
+*   possíveis retries
+*   mudança de status
 
-Simular latências e fluxos reais de aprovação
- O sistema agora permite simular:
+## 3.6. Simulação de Antifraude
 
+FailureSimulator retorna true com 60% de chance:
 
-análise de antifraude
+```
+public boolean shouldFail() {
+    return random.nextDouble() < 0.6;
+}
+```
+Resultado:
 
+*   pagamento pode ser APPROVED ou DECLINED
+*   simulação realista de gateway
 
-processamento externo
-
-
-delays no gateway
-
-
-marcação posterior como APPROVED ou DECLINED
-
-
-Por que isso melhora o sistema?
-Antes, todo o fluxo era síncrono, o que:
-degradava o tempo de resposta,
-
-
-tornava o sistema irreal para um gateway de pagamentos,
-
-
-acoplava API a tempo de processamento,
-
-
-inviabilizava futuras escalabilidades.
-
-
-Agora, com processamento assíncrono:
-a API responde rápido,
-
-
-os fluxos ficam independentes,
-
-
-e o FiadoPay passa a se comportar como um gateway de verdade, com eventos internos rodando em paralelo.
-
-
-2.5. Webhook automático
-O WebhookProcessor recebe o pagamento depois do processamento e dispara um callback.
-O fluxo é:
-Cria pagamento → Status = PENDING
-Thread roda → APPROVED ou DECLINED
-Webhook enviado automaticamente
-
-2.6. Simulação de fraude
-O FailureSimulator devolve true ou false com probabilidade de 60%.
-Isso força o sistema a alternar entre:
-APPROVED
-
-
-DECLINED
-
-
-Simula exatamente o comportamento de um gateway real.
-
-Arquitetura Final
+# 4. Arquitetura Final
+```
 edu.ucsal.fiadopay
- ├── annotations/
- │     └── PaymentHandler.java
- │
- ├── config/
- │     ├── ExecutorConfig.java
- │     ├── HttpClientConfig.java
- │
- ├── controller/
- │     ├── PaymentController.java
- │     ├── PaymentRequest.java
- │     ├── PaymentResponse.java
- │
- ├── domain/
- │     ├── Merchant.java
- │     ├── Payment.java
- │
- ├── records/
- │     └── InterestResult.java
- │
- ├── repo/
- │     ├── MerchantRepository.java
- │     ├── PaymentRepository.java
- │
- ├── service/
- │     ├── PaymentServiceFacade.java
- │
- ├── service/auth/
- │     └── MerchantAuthService.java
- │
- ├── service/payment/
- │     ├── PaymentCreatorService.java
- │     ├── PaymentQueryService.java
- │
- ├── service/webhook/
- │     └── WebhookProcessor.java
- │
- ├── service/fraud/
- │     └── FailureSimulator.java
- │
- └── strategies/
-       ├── BoletoInterestStrategy.java
-       ├── DebitInterestStrategy.java
-       ├── PixInterestStrategy.java
-       └── PaymentInterestStrategy.java
+├── annotations/
+│   └── PaymentHandler.java
+│
+├── config/
+│   ├── ExecutorConfig.java
+│   └── HttpClientConfig.java
+│
+├── controller/
+│   ├── PaymentController.java
+│   ├── PaymentRequest.java
+│   └── PaymentResponse.java
+│
+├── domain/
+│   ├── Merchant.java
+│   └── Payment.java
+│
+├── records/
+│   └── InterestResult.java
+│
+├── repo/
+│   ├── MerchantRepository.java
+│   └── PaymentRepository.java
+│
+├── service/
+│   ├── PaymentServiceFacade.java
+│
+│   ├── auth/
+│   │   └── MerchantAuthService.java
+│
+│   ├── payment/
+│   │   ├── PaymentCreatorService.java
+│   │   └── PaymentQueryService.java
+│
+│   ├── fraud/
+│   │   └── FailureSimulator.java
+│
+│   └── webhook/
+│       └── WebhookProcessor.java
+│
+└── strategies/
+    ├── PixInterestStrategy.java
+    ├── DebitInterestStrategy.java
+    ├── BoletoInterestStrategy.java
+    └── PaymentInterestStrategy.java
+```
+# 5. Mecanismo de Reflexão
 
-Mecanismo de Reflexão
-Como funciona:
-Spring injeta automaticamente todas as classes que implementam PaymentInterestStrategy.
+O Spring injeta todas as classes que implementam PaymentInterestStrategy.
+O PaymentCreatorService faz:
 
+*   varre as estratégias
+*   identifica as anotadas com @PaymentHandler
+*   compara o valor com req.method()
+*   aplica a correspondente
 
-No momento da criação do pagamento, o código verifica:
+Isso elimina IF/ELSE e cria um sistema baseado em plugins nativos.
 
+# 6. Processamento Assíncrono
 
-a classe tem @PaymentHandler?
+O fluxo principal executa:
+```
+executor.submit(() -> {
+    Thread.sleep(...);
+    // fraude
+    // gateway
+    // atualizar status
+    // enviar webhook
+});
+```
+Ganho:
 
+*   API rápida
+*   gateway realista
+*   escalabilidade
+*   isolamento dos fluxos internos
 
-o valor do handler bate com o req.method()?
+# 7. Padrões Aplicados
 
+| Padrão               | Onde foi usado                           |
+|----------------------|-------------------------------------------|
+| Facade               | PaymentServiceFacade                      |
+| Strategy             | Métodos de pagamento (PIX/DEBIT/BOLETO)  |
+| Repository           | Spring Data JPA                           |
+| Annotation + Reflection | Descoberta das estratégias            |
+| Async Processing     | ExecutorService                           |
+| IoC/DI               | Spring Boot                               |
 
-Se sim → essa estratégia calcula os juros para aquele pagamento.
+# 8. Limites do Sistema
 
+* Webhook não verifica SSL real
+* Fraude é pseudoaleatória
+* Persistência pode falhar em desligamento abrupto
+* Juros reais de cartão não implementados
+* Webhook não possui DLQ
 
-Esse mecanismo permite plugabilidade total.
+# 9. Prints
 
-Threads e Assíncrono
-O processamento principal é feito por:
-executor.submit(() -> { ... })
+## 9.1 Anotações Customizadas:
 
-Dentro dessa thread ocorre:
-espera simulada (Thread.sleep)
-
-
-simulação de fraudes
-
-
-atualização do status
-
-
-envio do webhook
-
-
-Isso evita travar a requisição principal, como um gateway de verdade.
-
-Padrões Aplicados
-Facade
-PaymentServiceFacade unifica a complexidade do fluxo.
-Strategy
-Cada método de pagamento tem sua estratégia.
-Annotation + Reflection
-Para selecionar estratégias dinamicamente.
-Repository Pattern
-Com Spring Data JPA.
-Asynchronous Processing
-Com ExecutorService.
-
-Limites e Pontos Conhecidos
-O webhook não verifica SSL real (é simulado).
-
-
-Fraude é aleatória e não baseada em dados comportamentais.
-
-
-Não há persistência garantida caso o servidor desligue no meio da execução.
+* Comprova o uso de metadados customizados fundamentais para o funcionamento do sistema. Essas anotações permitem que os handlers sejam descobertos por reflexão, evitando if-else e switch-case espalhados pela aplicação.
 
 
-Taxas de juros ainda são estáticas (para cartão ainda não implementadas).
+<img width="671" height="197" alt="Captura de tela 2025-11-21 180442" src="https://github.com/user-attachments/assets/6bafb7e7-ea1b-4249-bb3c-697db69355a6" />
+<img width="648" height="176" alt="Captura de tela 2025-11-21 181007" src="https://github.com/user-attachments/assets/23826823-3155-4da2-9a83-88cbcd7a558d" />
+
+## 9.2 Estratégias de Juros:
+
+* Valida a implementação do Padrão Strategy + Annotation-Based Discovery.
+
+<img width="643" height="335" alt="Captura de tela 2025-11-21 181104" src="https://github.com/user-attachments/assets/649ac38a-d6ec-4215-9ac0-d1b2ce23d87b" />
+<img width="691" height="374" alt="Captura de tela 2025-11-21 181217" src="https://github.com/user-attachments/assets/39721eb6-0e47-4d90-b2d5-e2627c64a832" />
+<img width="627" height="348" alt="Captura de tela 2025-11-21 181258" src="https://github.com/user-attachments/assets/86780015-3f76-49fb-821a-8f1072cfe8ad" />
 
 
-O sistema ainda não permite reprocessamento de webhook.
+## 9.3 ExecutorService em ação:
+
+* Demonstra execução assíncrona dos webhooks, requisito essencial do trabalho.
+
+  <img width="458" height="286" alt="Captura de tela 2025-11-21 181410" src="https://github.com/user-attachments/assets/9114d3a4-7cd1-4d04-a399-449f4e40416e" />
+  <img width="629" height="214" alt="Captura de tela 2025-11-21 181503" src="https://github.com/user-attachments/assets/3a96e651-468c-44b8-ad6a-d2a8ad296cfd" />
+
+
+## 9.4 Controller em funcionamento:
+
+* Mostra que a API está coerente com o contrato definido: auth, idempotência e CRUD de pagamentos.
+
+<img width="888" height="539" alt="Captura de tela 2025-11-21 181823" src="https://github.com/user-attachments/assets/731eead4-436f-40bb-81ea-ea211bc279bb" />
+
+# 10. Como Rodar (FiadoPay Simulator)
+
+Gateway de pagamento FiadoPay para a disciplina de POO Avançado. Substitui PSPs reais com um backend em memória (H2).
+
+## Instalação e Execução
+
+```
+./mvnw spring-boot:run
+# ou
+mvn spring-boot:run
+
+```
+## Pré-requisitos
+
+Para executar este projeto, certifique-se de ter o ambiente configurado com:
+Java: JDK 21 ou superior.
+Maven: 3.9.x ou superior.
+h2 console: http://localhost:8080/h2
+Swagger UI: http://localhost:8080/swagger-ui.html
+
+
 
 
