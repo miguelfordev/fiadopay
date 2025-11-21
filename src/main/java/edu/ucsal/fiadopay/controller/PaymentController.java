@@ -1,39 +1,45 @@
 package edu.ucsal.fiadopay.controller;
 
 import edu.ucsal.fiadopay.service.PaymentServiceFacade;
-import org.springframework.http.*;
+
 import org.springframework.web.bind.annotation.*;
 import lombok.RequiredArgsConstructor;
-import jakarta.validation.Valid;
-import io.swagger.v3.oas.annotations.Parameter;
+
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
+import org.springframework.http.ResponseEntity;
 
 @RestController
-@RequestMapping("/fiadopay/gateway")
+@RequestMapping("/payments")
 @RequiredArgsConstructor
 public class PaymentController {
   private final PaymentServiceFacade service;
 
-  @PostMapping("/payments")
+  @PostMapping
   @SecurityRequirement(name = "bearerAuth")
   public ResponseEntity<PaymentResponse> create(
-      @Parameter(hidden = true) @RequestHeader("Authorization") String auth,
-      @RequestHeader(value="Idempotency-Key", required=false) String idemKey,
-      @RequestBody @Valid PaymentRequest req
+          @RequestHeader(name = "Authorization", required = false) String auth,
+          @RequestHeader(name = "Idempotency-Key", required = false) String idemKey,
+          @RequestBody PaymentRequest req
   ) {
-    var resp = service.createPayment(auth, idemKey, req);
-    return ResponseEntity.status(HttpStatus.CREATED).body(resp);
+      return ResponseEntity.ok(service.createPayment(auth, idemKey, req));
   }
 
-  @GetMapping("/payments/{id}")
-  public PaymentResponse get(@PathVariable String id) {
-    return service.getPayment(id);
+
+  @GetMapping("/{id}")
+  public ResponseEntity<PaymentResponse> get(
+          @RequestHeader(name = "Authorization", required = false) String auth,
+          @PathVariable("id") String id
+  ) {
+      return ResponseEntity.ok(service.getPayment(auth, id));
   }
 
-  @PostMapping("/refunds")
+  @PostMapping("/{id}/refunds")
   @SecurityRequirement(name = "bearerAuth")
-  public java.util.Map<String,Object> refund(@Parameter(hidden = true) @RequestHeader("Authorization") String auth,
-                                   @RequestBody @Valid RefundRequest body) {
-    return service.refund(auth, body.paymentId());
+  public ResponseEntity<Object> refund(
+          @RequestHeader(name = "Authorization", required = false) String auth,
+          @PathVariable("id") String id
+  ) {
+      return ResponseEntity.ok(service.refund(auth, id));
   }
+
 }
